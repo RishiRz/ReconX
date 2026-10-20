@@ -26,7 +26,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 console = Console()
 
 DEFAULTS = {
@@ -426,6 +426,23 @@ def save_csv_report(results, output_path):
             writer.writerow(result)
 
 
+def parse_status_codes(value):
+    """Parse comma-separated HTTP status codes."""
+    try:
+        codes = [int(item.strip()) for item in value.split(",")]
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "Use comma-separated status codes, e.g. 200,301,403"
+        )
+
+    if not codes or any(code < 100 or code > 599 for code in codes):
+        raise argparse.ArgumentTypeError(
+            "HTTP status codes must be between 100 and 599"
+        )
+
+    return list(dict.fromkeys(codes))
+
+
 def run_scan(args):
     try:
         settings = resolve_settings(args)
@@ -515,7 +532,22 @@ def run_scan(args):
         result for result in results
         if not is_filtered(result, settings, wildcard)
     ]
+
+    if args.include_status is not None:
+        displayed = [
+            result for result in displayed
+            if result["status"] in args.include_status
+        ]
+
+    if args.exclude_redirects:
+        displayed = [
+            result for result in displayed
+            if result["status"] is None
+            or not 300 <= result["status"] < 400
+        ]
+
     filtered_count = len(results) - len(displayed)
+
 
     for result in displayed:
         result["classification"] = classify_result(result)
@@ -621,7 +653,20 @@ def main():
     scan.add_argument("--exclude-size", nargs="*", type=int, default=None)
     scan.add_argument(
         "--show-errors", action="store_true", default=None
+    )    
+    scan.add_argument(
+        "--include-status",
+        type=parse_status_codes,
+        default=None,
+        help="Only display selected HTTP status codes, e.g. 200,301,403",
     )
+
+    scan.add_argument(
+        "--exclude-redirects",
+        action="store_true",
+        help="Hide HTTP redirect responses (3xx)",
+    )
+
     scan.add_argument(
         "--no-wildcard-detection",
         action="store_false",

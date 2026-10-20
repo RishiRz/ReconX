@@ -246,3 +246,46 @@ def test_request_info_records_redirect(monkeypatch):
         timeout=5,
         allow_redirects=False,
     )
+
+def test_parse_status_codes():
+    assert reconx.parse_status_codes("200,301,403") == [200, 301, 403]
+    assert reconx.parse_status_codes("200, 301, 200") == [200, 301]
+
+
+def test_parse_status_codes_rejects_invalid_values():
+    with pytest.raises(argparse.ArgumentTypeError):
+        reconx.parse_status_codes("200,abc")
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        reconx.parse_status_codes("99,600")
+
+
+def test_include_status_filter():
+    results = [
+        {"status": 200},
+        {"status": 301},
+        {"status": 403},
+    ]
+    allowed = reconx.parse_status_codes("200,403")
+
+    filtered = [r for r in results if r["status"] in allowed]
+
+    assert [r["status"] for r in filtered] == [200, 403]
+
+
+def test_exclude_redirects_filter():
+    results = [
+        {"status": 200},
+        {"status": 301},
+        {"status": 302},
+        {"status": 403},
+        {"status": None},
+    ]
+
+    filtered = [
+        r for r in results
+        if r["status"] is None
+        or not 300 <= r["status"] < 400
+    ]
+
+    assert [r["status"] for r in filtered] == [200, 403, None]
