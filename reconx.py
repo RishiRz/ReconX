@@ -7,6 +7,7 @@ import json
 import csv
 import secrets
 import sys
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -26,7 +27,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 console = Console()
 
 DEFAULTS = {
@@ -205,12 +206,18 @@ def request_info(url, timeout):
 
 
 
-def scan_one(base_url, word, timeout):
+
+def scan_one(base_url, word, timeout, rate_limiter=None):
     target = urljoin(base_url, word)
     start = time.perf_counter()
 
     try:
+        # Wait before sending the HTTP request.
+        if rate_limiter is not None:
+            rate_limiter.wait()
+
         info = request_info(target, timeout)
+
         return {
             "path": "/" + word,
             "url": target,
@@ -218,6 +225,7 @@ def scan_one(base_url, word, timeout):
             "time_ms": round((time.perf_counter() - start) * 1000, 2),
             "error": None,
         }
+
     except requests.RequestException as error:
         return {
             "path": "/" + word,
@@ -226,9 +234,11 @@ def scan_one(base_url, word, timeout):
             "size": None,
             "content_type": None,
             "body_hash": None,
-            "time_ms": None,
+            "redirect_url": None,
+            "time_ms": round((time.perf_counter() - start) * 1000, 2),
             "error": str(error),
         }
+
 
 
 
@@ -443,6 +453,28 @@ def parse_status_codes(value):
     return list(dict.fromkeys(codes))
 
 
+class RateLimiter:
+    """Limit the start rate of concurrent HTTP requests."""
+
+    def __init__(self, requests_per_second):
+        if requests_per_second <= 0:
+            raise ValueError("Request rate must be greater than zero")
+
+        self.interval = 1.0 / requests_per_second
+        self.lock = threading.Lock()
+        self.next_allowed = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.monotonic()
+            delay = self.next_allowed - now
+
+            if delay > 0:
+                time.sleep(delay)
+
+            self.next_allowed = time.monotonic() + self.interval
+
+
 def run_scan(args):
     try:
         settings = resolve_settings(args)
@@ -450,6 +482,9 @@ def run_scan(args):
     except (ValueError, OSError) as error:
         console.print(f"[bold red]Error:[/bold red] {error}")
         return 1
+
+    if args.max_requests is not None:
+        words = words[:args.max_requests]
 
     if not words:
         console.print("[bold red]Wordlist contains no usable entries.[/bold red]")
@@ -489,14 +524,20 @@ def run_scan(args):
     errors = []
     start = time.perf_counter()
 
+    rate_limiter = RateLimiter(args.rate_limit)
+
     try:
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=settings["threads"]
         ) as executor:
             futures = [
                 executor.submit(
-                    scan_one, base_url, word, settings["timeout"]
-                )
+                                    scan_one,
+                                    base_url,
+                                    word,
+                                    settings["timeout"],
+                                    rate_limiter,
+                                )
                 for word in words
             ]
 
@@ -674,8 +715,29 @@ def main():
         default=None,
     )
 
+    scan.add_argument(
+        "--rate-limit",
+        type=float,
+        default=5.0,
+        help="Maximum scan request start rate per second (default: 5)",
+    )
+
+    scan.add_argument(
+        "--max-requests",
+        type=int,
+        default=None,
+        help="Maximum number of wordlist entries to scan",
+    )
+
+
     args = parser.parse_args()
 
+    if args.rate_limit <= 0:
+        parser.error("--rate-limit must be greater than zero")
+
+    if args.max_requests is not None and args.max_requests < 1:
+        parser.error("--max-requests must be at least 1")
+        
     if args.command == "scan":
         return run_scan(args)
 

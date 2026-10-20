@@ -1,11 +1,36 @@
 from unittest.mock import Mock
 import argparse
 import json
+import time
 
 import pytest
 import requests
 
 import reconx
+
+def test_rate_limiter_rejects_non_positive_rate():
+        import reconx
+        import pytest
+
+        with pytest.raises(ValueError):
+            reconx.RateLimiter(0)
+
+        with pytest.raises(ValueError):
+            reconx.RateLimiter(-1)
+
+
+def test_rate_limiter_waits_between_requests():
+        import reconx
+
+        limiter = reconx.RateLimiter(10)
+
+        start = time.monotonic()
+        limiter.wait()
+        limiter.wait()
+        elapsed = time.monotonic() - start
+
+        assert elapsed >= 0.08
+
 
 
 def test_valid_url_accepts_http_and_https():
@@ -289,3 +314,5 @@ def test_exclude_redirects_filter():
     ]
 
     assert [r["status"] for r in filtered] == [200, 403, None]
+
+   
