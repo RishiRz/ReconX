@@ -1,4 +1,4 @@
-
+from unittest.mock import Mock
 import argparse
 import json
 
@@ -197,3 +197,52 @@ def test_scan_one_handles_request_error(monkeypatch):
     assert result["status"] is None
     assert result["error"] is not None
     assert "timeout" in result["error"].lower()
+
+
+def test_classify_result_categories():
+    assert reconx.classify_result({"status": 200}) == "SUCCESS"
+    assert reconx.classify_result({"status": 301}) == "REDIRECT"
+    assert reconx.classify_result({"status": 403}) == "RESTRICTED"
+    assert reconx.classify_result({"status": 404}) == "NOT_FOUND"
+    assert reconx.classify_result({"status": 500}) == "SERVER_ERROR"
+    assert reconx.classify_result({"status": None}) == "ERROR"
+
+
+def test_find_duplicates_groups_identical_responses():
+    results = [
+        {"url": "http://localhost/admin", "status": 200, "body_hash": "abc"},
+        {"url": "http://localhost/login", "status": 200, "body_hash": "abc"},
+        {"url": "http://localhost/about", "status": 200, "body_hash": "xyz"},
+    ]
+
+    duplicates = reconx.find_duplicates(results)
+
+    assert len(duplicates) == 1
+    assert duplicates[0]["count"] == 2
+    assert set(duplicates[0]["urls"]) == {
+        "http://localhost/admin",
+        "http://localhost/login",
+    }
+
+
+def test_request_info_records_redirect(monkeypatch):
+    response = Mock()
+    response.status_code = 301
+    response.content = b""
+    response.headers = {
+        "Location": "/admin/",
+        "Content-Type": "",
+    }
+
+    request_mock = Mock(return_value=response)
+    monkeypatch.setattr(reconx.requests, "get", request_mock)
+
+    result = reconx.request_info("http://localhost:8000/admin", 5)
+
+    assert result["status"] == 301
+    assert result["redirect_url"] == "http://localhost:8000/admin/"
+    request_mock.assert_called_once_with(
+        "http://localhost:8000/admin",
+        timeout=5,
+        allow_redirects=False,
+    )

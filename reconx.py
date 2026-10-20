@@ -26,7 +26,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 console = Console()
 
 DEFAULTS = {
@@ -181,21 +181,28 @@ def load_words(wordlist, extensions):
     return sorted(words)
 
 
+
 def request_info(url, timeout):
+    """Collect response details without following redirects."""
     response = requests.get(
         url,
         timeout=timeout,
         allow_redirects=False,
-        headers={"User-Agent": f"ReconX/{VERSION}"},
     )
+
     body = response.content
+    location = response.headers.get("Location")
+
+    redirect_url = urljoin(url, location) if location else None
 
     return {
         "status": response.status_code,
         "size": len(body),
         "content_type": response.headers.get("Content-Type", ""),
         "body_hash": hashlib.sha256(body).hexdigest(),
+        "redirect_url": redirect_url,
     }
+
 
 
 def scan_one(base_url, word, timeout):
@@ -400,14 +407,17 @@ def find_duplicates(results):
 def save_csv_report(results, output_path):
     """Save scan results as a CSV file."""
     fields = [
-        "url",
-        "status",
-        "size",
-        "content_type",
-        "body_hash",
-        "error",
-    ]
-
+            "path",
+            "url",
+            "status",
+            "classification",
+            "size",
+            "content_type",
+            "redirect_url",
+            "body_hash",
+            "error",
+        ]
+    
     with open(output_path, "w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -507,6 +517,26 @@ def run_scan(args):
     ]
     filtered_count = len(results) - len(displayed)
 
+    for result in displayed:
+        result["classification"] = classify_result(result)
+
+    duplicates = find_duplicates(displayed)
+
+    if duplicates:
+        duplicate_table = Table(title="Duplicate Responses")
+        duplicate_table.add_column("Status")
+        duplicate_table.add_column("Count")
+        duplicate_table.add_column("URLs")
+
+        for group in duplicates:
+            duplicate_table.add_row(
+                str(group["status"]),
+                str(group["count"]),
+                "\n".join(group["urls"]),
+            )
+
+        console.print(duplicate_table)
+
     if displayed:
         show_results(displayed)
     else:
@@ -551,6 +581,7 @@ def run_scan(args):
                 "duration_seconds": round(duration, 2),
             },
             "results": displayed,
+            "duplicates": duplicates,
             "errors": errors if settings["show_errors"] else [],
         }
 
