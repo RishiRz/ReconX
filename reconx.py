@@ -224,7 +224,9 @@ def scan_one(base_url, word, timeout):
         }
 
 
+
 def detect_wildcard(base_url, timeout):
+    """Detect repeated response signatures for random nonexistent paths."""
     probes = []
 
     for _ in range(3):
@@ -237,22 +239,33 @@ def detect_wildcard(base_url, timeout):
         except requests.RequestException:
             continue
 
-    signatures = [
-        (item["status"], item["size"], item["content_type"])
-        for item in probes
-    ]
+    def signature(item):
+        return (
+            item["status"],
+            item["size"],
+            item["content_type"],
+            item["body_hash"],
+        )
 
-    for signature in set(signatures):
-        if signatures.count(signature) >= 2:
+    signatures = [signature(item) for item in probes]
+
+    for candidate in set(signatures):
+        if signatures.count(candidate) >= 2:
             return {
                 "detected": True,
-                "status": signature[0],
-                "size": signature[1],
-                "content_type": signature[2],
+                "status": candidate[0],
+                "size": candidate[1],
+                "content_type": candidate[2],
+                "body_hash": candidate[3],
                 "probes": len(probes),
             }
 
-    return {"detected": False, "probes": len(probes)}
+    return {
+        "detected": False,
+        "probes": len(probes),
+    }
+
+
 
 
 def is_filtered(result, settings, wildcard):
@@ -263,14 +276,15 @@ def is_filtered(result, settings, wildcard):
         return True
 
     if wildcard.get("detected"):
-        if (
+        return (
             result["status"] == wildcard["status"]
             and result["size"] == wildcard["size"]
             and result["content_type"] == wildcard["content_type"]
-        ):
-            return True
+            and result["body_hash"] == wildcard["body_hash"]
+        )
 
     return False
+
 
 
 def show_results(results):
