@@ -1,0 +1,10 @@
+
+{
+  "threads": 10,
+  "timeout": 5,
+  "extensions": [],
+  "exclude_status": [404],
+  "exclude_size": [],
+  "show_errors": false,
+  "wildcard_detection": true
+}
