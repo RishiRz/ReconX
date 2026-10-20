@@ -27,7 +27,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-VERSION = "0.9.0"
+VERSION = "1.0.0"
 console = Console()
 
 DEFAULTS = {
@@ -41,6 +41,31 @@ DEFAULTS = {
 }
 
 ALLOWED_PROFILE_KEYS = set(DEFAULTS)
+
+
+def format_request_error(error):
+    """Return a concise, user-friendly network error message."""
+    if isinstance(error, requests.exceptions.ConnectTimeout):
+        return "Connection timed out."
+
+    if isinstance(error, requests.exceptions.ReadTimeout):
+        return "Server response timed out."
+
+    if isinstance(error, requests.exceptions.ConnectionError):
+        message = str(error).lower()
+
+        if "name resolution" in message or "getaddrinfo failed" in message:
+            return "DNS resolution failed."
+
+        if "connection refused" in message or "actively refused" in message:
+            return "Connection refused."
+
+        return "Could not connect to the server."
+
+    if isinstance(error, requests.exceptions.Timeout):
+        return "Request timeout."
+
+    return str(error)
 
 
 def banner():
@@ -236,7 +261,7 @@ def scan_one(base_url, word, timeout, rate_limiter=None):
             "body_hash": None,
             "redirect_url": None,
             "time_ms": round((time.perf_counter() - start) * 1000, 2),
-            "error": str(error),
+            "error": format_request_error(error),
         }
 
 
@@ -546,6 +571,7 @@ def parse_status_codes(value):
     return list(dict.fromkeys(codes))
 
 
+
 class RateLimiter:
     """Limit the start rate of concurrent HTTP requests."""
 
@@ -558,14 +584,19 @@ class RateLimiter:
         self.next_allowed = 0.0
 
     def wait(self):
+        # Reserve request-start times in one shared sequence.
+        # Holding the lock prevents concurrent workers from
+        # passing the limiter at the same time.
         with self.lock:
             now = time.monotonic()
-            delay = self.next_allowed - now
+            scheduled_time = max(now, self.next_allowed)
+            delay = scheduled_time - now
 
             if delay > 0:
                 time.sleep(delay)
 
-            self.next_allowed = time.monotonic() + self.interval
+            self.next_allowed = scheduled_time + self.interval
+
 
 
 def run_scan(args):
@@ -583,7 +614,11 @@ def run_scan(args):
         console.print("[bold red]Wordlist contains no usable entries.[/bold red]")
         return 1
 
-    base_url = args.url.rstrip("/") + "/"
+    try:
+        base_url = valid_url(args.url).rstrip("/") + "/"
+    except argparse.ArgumentTypeError as error:
+        console.print(f"[bold red]Invalid target URL:[/bold red] {error}")
+        return 1
 
     if args.save_profile:
         try:
@@ -623,17 +658,16 @@ def run_scan(args):
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=settings["threads"]
         ) as executor:
-            futures = [
+            futures = {
                 executor.submit(
-                                    scan_one,
-                                    base_url,
-                                    word,
-                                    settings["timeout"],
-                                    rate_limiter,
-                                )
+                    scan_one,
+                    base_url,
+                    word,
+                    settings["timeout"],
+                    rate_limiter,
+                ): word
                 for word in words
-            ]
-
+            }
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
@@ -645,16 +679,34 @@ def run_scan(args):
                 console=console,
             ) as progress:
                 task = progress.add_task("Scanning", total=len(futures))
+                                
+            for future in concurrent.futures.as_completed(futures):
+                word = futures[future]
 
-                for future in concurrent.futures.as_completed(futures):
+                try:
                     result = future.result()
+                except Exception as error:
+                    target = urljoin(base_url, word)
 
+                    errors.append({
+                        "path": "/" + word,
+                        "url": target,
+                        "status": None,
+                        "size": None,
+                        "content_type": None,
+                        "body_hash": None,
+                        "redirect_url": None,
+                        "time_ms": None,
+                        "error": f"Unexpected worker error: {error}",
+                    })
+                else:
                     if result["error"]:
                         errors.append(result)
                     else:
                         results.append(result)
 
-                    progress.advance(task)
+                progress.advance(task)
+
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Scan interrupted by user.[/yellow]")
