@@ -26,7 +26,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 console = Console()
 
 DEFAULTS = {
