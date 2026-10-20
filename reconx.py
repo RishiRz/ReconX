@@ -1,10 +1,10 @@
-
 #!/usr/bin/env python3
 
 import argparse
 import concurrent.futures
 import hashlib
 import json
+import csv
 import secrets
 import sys
 import time
@@ -344,6 +344,78 @@ def show_summary(results, displayed, errors, filtered, duration):
         console.print(status_table)
 
 
+
+from collections import defaultdict
+
+
+def classify_result(result):
+    """Assign a simple category to a scan result."""
+    status = result.get("status")
+
+    if status is None:
+        return "ERROR"
+    if status in (200, 201, 202, 204):
+        return "SUCCESS"
+    if status in (301, 302, 303, 307, 308):
+        return "REDIRECT"
+    if status in (401, 403):
+        return "RESTRICTED"
+    if status == 404:
+        return "NOT_FOUND"
+    if 400 <= status < 500:
+        return "CLIENT_ERROR"
+    if 500 <= status < 600:
+        return "SERVER_ERROR"
+
+    return "OTHER"
+
+
+def find_duplicates(results):
+    """Group responses with the same status and body hash."""
+    groups = defaultdict(list)
+
+    for result in results:
+        status = result.get("status")
+        body_hash = result.get("body_hash")
+
+        # Ignore failed requests and responses without a fingerprint.
+        if status is None or not body_hash:
+            continue
+
+        key = (status, body_hash)
+        groups[key].append(result.get("url", ""))
+
+    return [
+        {
+            "status": key[0],
+            "body_hash": key[1],
+            "count": len(urls),
+            "urls": urls,
+        }
+        for key, urls in groups.items()
+        if len(urls) > 1
+    ]
+
+
+def save_csv_report(results, output_path):
+    """Save scan results as a CSV file."""
+    fields = [
+        "url",
+        "status",
+        "size",
+        "content_type",
+        "body_hash",
+        "error",
+    ]
+
+    with open(output_path, "w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+
+        for result in results:
+            writer.writerow(result)
+
+
 def run_scan(args):
     try:
         settings = resolve_settings(args)
@@ -452,6 +524,16 @@ def run_scan(args):
 
     show_summary(results, displayed, len(errors), filtered_count, duration)
 
+    
+    if args.csv:
+        try:
+            save_csv_report(displayed, args.csv)
+            console.print(f"[green]CSV report saved:[/green] {args.csv}")
+        except OSError as error:
+            console.print(f"[red]Could not save CSV report:[/red] {error}")
+            return 1
+
+
     if args.output:
         output_path = Path(args.output).expanduser()
         report = {
@@ -501,6 +583,7 @@ def main():
     scan.add_argument("--timeout", type=float, default=None)
     scan.add_argument("-x", "--extensions", nargs="*", default=None)
     scan.add_argument("-o", "--output")
+    scan.add_argument("--csv", help="Save scan results to a CSV file",)
     scan.add_argument("--profile", help="Load settings from a JSON profile.")
     scan.add_argument("--save-profile", help="Save effective settings to a JSON profile.")
     scan.add_argument("--exclude-status", nargs="*", type=int, default=None)
