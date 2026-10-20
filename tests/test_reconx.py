@@ -8,6 +8,62 @@ import requests
 
 import reconx
 
+
+def test_save_html_report_creates_report(tmp_path):
+    import reconx
+
+    output = tmp_path / "report.html"
+    results = [
+        {
+            "status": 301,
+            "path": "/admin",
+            "url": "http://127.0.0.1:8000/admin",
+            "classification": "REDIRECT",
+            "size": 0,
+            "time_ms": 9.66,
+            "redirect_url": "http://127.0.0.1:8000/admin/",
+        }
+    ]
+
+    reconx.save_html_report(
+        results,
+        output,
+        target="http://127.0.0.1:8000/",
+        duration=0.84,
+    )
+
+    content = output.read_text(encoding="utf-8")
+
+    assert "ReconX Scan Report" in content
+    assert "/admin" in content
+    assert "REDIRECT" in content
+    assert "HTTP 301" in content
+
+
+def test_save_html_report_escapes_untrusted_values(tmp_path):
+    import reconx
+
+    output = tmp_path / "safe-report.html"
+    results = [
+        {
+            "status": 200,
+            "path": '<script>alert("test")</script>',
+            "url": "http://127.0.0.1:8000/",
+            "classification": "FOUND",
+            "size": 10,
+            "time_ms": 1.0,
+            "redirect_url": None,
+        }
+    ]
+
+    reconx.save_html_report(results, output)
+
+    content = output.read_text(encoding="utf-8")
+
+    assert "<script>alert(" not in content
+    assert "&lt;script&gt;" in content
+
+
 def test_rate_limiter_rejects_non_positive_rate():
         import reconx
         import pytest

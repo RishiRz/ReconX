@@ -414,6 +414,99 @@ def find_duplicates(results):
     ]
 
 
+def save_html_report(results, output_path, target="", duration=0):
+    """Save scan results as a standalone HTML report."""
+    import html
+    from collections import Counter
+    from datetime import datetime
+    from pathlib import Path
+
+    status_counts = Counter(
+        str(result.get("status") or "Error")
+        for result in results
+    )
+
+    def safe(value):
+        return html.escape(str(value if value is not None else ""))
+
+    rows = []
+
+    for result in results:
+        rows.append(
+            "<tr>"
+            f"<td>{safe(result.get('status'))}</td>"
+            f"<td>{safe(result.get('path'))}</td>"
+            f"<td>{safe(result.get('classification'))}</td>"
+            f"<td>{safe(result.get('size'))}</td>"
+            f"<td>{safe(result.get('time_ms'))}</td>"
+            f"<td>{safe(result.get('redirect_url'))}</td>"
+            f"<td>{safe(result.get('url'))}</td>"
+            "</tr>"
+        )
+
+    status_rows = "".join(
+        f"<li>HTTP {safe(status)}: {count}</li>"
+        for status, count in sorted(status_counts.items())
+    )
+
+    document = f"""<!doctype html>
+            <html lang="en">
+            <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>ReconX Scan Report</title>
+            <style>
+            body {{ font-family: Arial, sans-serif; margin: 2rem; color: #202938; }}
+            header {{ border-bottom: 2px solid #334155; margin-bottom: 1.5rem; }}
+            h1 {{ margin-bottom: .25rem; }}
+            .meta {{ color: #475569; overflow-wrap: anywhere; }}
+            .cards {{ display: flex; flex-wrap: wrap; gap: 1rem; }}
+            .card {{ background: #f1f5f9; padding: 1rem; border-radius: 8px; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 1rem; }}
+            th, td {{ border: 1px solid #cbd5e1; padding: .65rem; text-align: left; }}
+            th {{ background: #e2e8f0; }}
+            td {{ overflow-wrap: anywhere; }}
+            tr:nth-child(even) {{ background: #f8fafc; }}
+            </style>
+            </head>
+            <body>
+            <header>
+            <h1>ReconX Scan Report</h1>
+            <p class="meta">Generated: {safe(datetime.now().astimezone().isoformat(timespec="seconds"))}</p>
+            <p class="meta">Target: {safe(target)}</p>
+            <p class="meta">Duration: {safe(round(duration, 2))} seconds</p>
+            </header>
+
+            <section class="cards">
+            <div class="card"><strong>Displayed findings</strong><br>{len(results)}</div>
+            <div class="card"><strong>Distinct status groups</strong><br>{len(status_counts)}</div>
+            </section>
+
+            <h2>HTTP Status Breakdown</h2>
+            <ul>{status_rows or "<li>No results</li>"}</ul>
+
+            <h2>Discovered Paths</h2>
+            <table>
+            <thead>
+            <tr>
+            <th>Status</th><th>Path</th><th>Classification</th>
+            <th>Size (bytes)</th><th>Time (ms)</th>
+            <th>Redirect URL</th><th>URL</th>
+            </tr>
+            </thead>
+            <tbody>
+            {"".join(rows) or '<tr><td colspan="7">No findings</td></tr>'}
+            </tbody>
+            </table>
+            </body>
+            </html>
+            """
+
+    output_path = Path(output_path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(document, encoding="utf-8")
+
+
 def save_csv_report(results, output_path):
     """Save scan results as a CSV file."""
     fields = [
@@ -668,6 +761,28 @@ def run_scan(args):
             console.print(f"[red]Could not save report:[/red] {error}")
             return 1
 
+    
+    if args.html:
+        try:
+            html_path = Path(args.html).expanduser()
+            html_path.parent.mkdir(parents=True, exist_ok=True)
+
+            save_html_report(
+                displayed,
+                html_path,
+                target=base_url,
+                duration=duration,
+            )
+
+            console.print(
+                f"[green]HTML report saved:[/green] {html_path}"
+            )
+        except OSError as error:
+            console.print(
+                f"[red]Could not save HTML report:[/red] {error}"
+            )
+            return 1
+
     return 0
 
 
@@ -727,6 +842,11 @@ def main():
         type=int,
         default=None,
         help="Maximum number of wordlist entries to scan",
+    )
+
+    scan.add_argument(
+        "--html",
+        help="Save scan results as an HTML report",
     )
 
 
