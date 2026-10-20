@@ -3,7 +3,9 @@
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -11,7 +13,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 GREEN = "\033[92m"
 CYAN = "\033[96m"
@@ -66,7 +68,6 @@ def load_words(wordlist, extensions):
                 continue
 
             word = word.lstrip("/")
-
             if not word:
                 continue
 
@@ -80,26 +81,37 @@ def load_words(wordlist, extensions):
     return sorted(words)
 
 
+def request_info(url, timeout):
+    """Fetch response metadata without following redirects."""
+    response = requests.get(
+        url,
+        timeout=timeout,
+        allow_redirects=False,
+        headers={"User-Agent": f"ReconX/{VERSION}"},
+    )
+
+    body = response.content
+
+    return {
+        "status": response.status_code,
+        "size": len(body),
+        "content_type": response.headers.get("Content-Type", ""),
+        "body_hash": hashlib.sha256(body).hexdigest(),
+    }
+
+
 def scan_one(base_url, word, timeout):
     target = urljoin(base_url, word)
+    start = time.perf_counter()
 
     try:
-        start = time.perf_counter()
-
-        response = requests.get(
-            target,
-            timeout=timeout,
-            allow_redirects=False,
-            headers={"User-Agent": f"ReconX/{VERSION}"},
-        )
-
+        info = request_info(target, timeout)
         elapsed = round((time.perf_counter() - start) * 1000, 2)
 
         return {
             "path": "/" + word,
             "url": target,
-            "status": response.status_code,
-            "size": len(response.content),
+            **info,
             "time_ms": elapsed,
             "error": None,
         }
@@ -110,9 +122,49 @@ def scan_one(base_url, word, timeout):
             "url": target,
             "status": None,
             "size": None,
+            "content_type": None,
+            "body_hash": None,
             "time_ms": None,
             "error": str(error),
         }
+
+
+def detect_wildcard(base_url, timeout):
+    """
+    Heuristic: probe three random, unlikely paths.
+    Two matching status/size/content-type signatures suggest
+    that the server may return a common response for missing paths.
+    """
+    probes = []
+
+    for _ in range(3):
+        random_path = f"reconx-not-found-{secrets.token_hex(8)}"
+        try:
+            probes.append(
+                request_info(urljoin(base_url, random_path), timeout)
+            )
+        except requests.RequestException:
+            continue
+
+    signatures = [
+        (item["status"], item["size"], item["content_type"])
+        for item in probes
+    ]
+
+    for signature in set(signatures):
+        if signatures.count(signature) >= 2:
+            return {
+                "detected": True,
+                "status": signature[0],
+                "size": signature[1],
+                "content_type": signature[2],
+                "probes": len(probes),
+            }
+
+    return {
+        "detected": False,
+        "probes": len(probes),
+    }
 
 
 def status_color(status):
@@ -130,7 +182,7 @@ def run_scan(args):
 
     try:
         words = load_words(args.wordlist, args.extensions)
-    except (OSError, UnicodeError) as error:
+    except OSError as error:
         print(f"{RED}[!] {error}{RESET}")
         return 1
 
@@ -140,13 +192,36 @@ def run_scan(args):
 
     base_url = args.url.rstrip("/") + "/"
 
-    print(f"{CYAN}[+] Target:      {base_url}")
-    print(f"[+] Wordlist:    {args.wordlist}")
-    print(f"[+] Candidates:  {len(words)}")
-    print(f"[+] Threads:     {args.threads}")
-    print(f"[+] Timeout:     {args.timeout}s{RESET}\n")
+    print(f"{CYAN}[+] Target:     {base_url}")
+    print(f"[+] Candidates: {len(words)}")
+    print(f"[+] Threads:    {args.threads}")
+    print(f"[+] Timeout:    {args.timeout}s{RESET}")
+
+    wildcard = {"detected": False, "probes": 0}
+
+    if not args.no_wildcard_detection:
+        print(f"{CYAN}[+] Checking for wildcard responses...{RESET}")
+        wildcard = detect_wildcard(base_url, args.timeout)
+
+        if wildcard["detected"]:
+            print(
+                f"{YELLOW}[!] Possible wildcard response detected: "
+                f"HTTP {wildcard['status']}, "
+                f"{wildcard['size']} bytes.{RESET}"
+            )
+            print(
+                f"{YELLOW}[!] Matching responses will be hidden. "
+                "Use --no-wildcard-detection to disable this heuristic."
+                f"{RESET}"
+            )
+        else:
+            print(f"{GREEN}[+] No consistent wildcard signature detected.{RESET}")
+
+    print()
 
     results = []
+    shown = []
+    errors = 0
     completed = 0
     started = time.perf_counter()
 
@@ -155,9 +230,7 @@ def run_scan(args):
             max_workers=args.threads
         ) as executor:
             futures = {
-                executor.submit(
-                    scan_one, base_url, word, args.timeout
-                ): word
+                executor.submit(scan_one, base_url, word, args.timeout): word
                 for word in words
             }
 
@@ -166,21 +239,33 @@ def run_scan(args):
                 completed += 1
 
                 if result["error"]:
+                    errors += 1
                     if args.show_errors:
                         print(
-                            f"{RED}[ERROR] {result['path']}: "
+                            f"\n{RED}[ERROR] {result['path']}: "
                             f"{result['error']}{RESET}"
                         )
                 else:
                     results.append(result)
 
-                    if (
-                        result["status"] not in args.exclude_status
-                        and result["size"] not in args.exclude_size
-                    ):
+                    excluded = (
+                        result["status"] in args.exclude_status
+                        or result["size"] in args.exclude_size
+                    )
+
+                    signature_matches = (
+                        wildcard["detected"]
+                        and result["status"] == wildcard.get("status")
+                        and result["size"] == wildcard.get("size")
+                        and result["content_type"]
+                        == wildcard.get("content_type")
+                    )
+
+                    if not excluded and not signature_matches:
+                        shown.append(result)
                         color = status_color(result["status"])
                         print(
-                            f"{color}[{result['status']}] "
+                            f"\n{color}[{result['status']}] "
                             f"{result['path']:<30} "
                             f"{result['size']:>8} bytes "
                             f"{result['time_ms']:>8} ms{RESET}"
@@ -197,27 +282,30 @@ def run_scan(args):
         return 130
 
     duration = time.perf_counter() - started
-    print("\n")
 
-    print(f"{GREEN}[+] Scan finished")
-    print(f"[+] Requests completed: {len(results)}")
+    print(f"\n\n{GREEN}[+] Scan finished{RESET}")
+    print(f"[+] HTTP responses: {len(results)}")
+    print(f"[+] Displayed results: {len(shown)}")
+    print(f"[+] Request errors: {errors}")
     print(f"[+] Duration: {duration:.2f}s")
-    print(f"[+] Responses per second: "
-          f"{len(results) / duration if duration else 0:.2f}{RESET}")
 
     if args.output:
         output_path = Path(args.output).expanduser()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
 
         report = {
             "tool": "ReconX",
             "version": VERSION,
             "target": base_url,
             "duration_seconds": round(duration, 2),
-            "results": results,
+            "wildcard_detection": wildcard,
+            "total_candidates": len(words),
+            "http_responses": len(results),
+            "request_errors": errors,
+            "results": shown,
         }
 
         try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
                 json.dumps(report, indent=2),
                 encoding="utf-8",
@@ -233,7 +321,7 @@ def run_scan(args):
 def main():
     parser = argparse.ArgumentParser(
         prog="reconx",
-        description="Simple web content discovery for authorized testing.",
+        description="Web content discovery for authorized testing.",
     )
     parser.add_argument(
         "--version",
@@ -241,46 +329,45 @@ def main():
         version=f"ReconX {VERSION}",
     )
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(
+        dest="command", required=True
+    )
 
     scan = subparsers.add_parser(
-        "scan", help="Discover web paths using a wordlist."
+        "scan", help="Discover paths using a wordlist."
     )
     scan.add_argument(
-        "-u", "--url", required=True, type=valid_url,
-        help="Target base URL, e.g. http://127.0.0.1:8000",
+        "-u", "--url", required=True, type=valid_url
     )
     scan.add_argument(
-        "-w", "--wordlist", required=True,
-        help="Path to a newline-separated wordlist.",
+        "-w", "--wordlist", required=True
     )
     scan.add_argument(
-        "-t", "--threads", type=int, default=10,
-        help="Concurrent requests (default: 10; maximum: 100).",
+        "-t", "--threads", type=int, default=10
     )
     scan.add_argument(
-        "--timeout", type=float, default=5,
-        help="Request timeout in seconds (default: 5).",
+        "--timeout", type=float, default=5
     )
     scan.add_argument(
-        "-x", "--extensions", nargs="*", default=[],
-        help="Optional extensions, e.g. php html txt",
+        "-x", "--extensions", nargs="*", default=[]
     )
     scan.add_argument(
         "-o", "--output",
-        help="Save all successful HTTP responses to a JSON report.",
+        help="Save filtered results to a JSON report.",
     )
     scan.add_argument(
-        "--exclude-status", nargs="*", type=int, default=[404],
-        help="Status codes to hide (default: 404).",
+        "--exclude-status", nargs="*", type=int, default=[404]
     )
     scan.add_argument(
-        "--exclude-size", nargs="*", type=int, default=[],
-        help="Response sizes in bytes to hide.",
+        "--exclude-size", nargs="*", type=int, default=[]
     )
     scan.add_argument(
-        "--show-errors", action="store_true",
-        help="Display individual request errors.",
+        "--no-wildcard-detection",
+        action="store_true",
+        help="Disable random-path wildcard checks.",
+    )
+    scan.add_argument(
+        "--show-errors", action="store_true"
     )
 
     args = parser.parse_args()
@@ -291,7 +378,7 @@ def main():
         if args.timeout <= 0:
             parser.error("--timeout must be greater than zero")
         if any(not 100 <= code <= 599 for code in args.exclude_status):
-            parser.error("Excluded status codes must be between 100 and 599")
+            parser.error("Excluded status codes must be 100-599")
         if any(size < 0 for size in args.exclude_size):
             parser.error("Excluded sizes cannot be negative")
 
